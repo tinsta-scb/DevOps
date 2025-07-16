@@ -1,0 +1,181 @@
+---
+- name: Deploy RTDS Components with Mixed Copy and Extraction
+  hosts: localhost
+  become: true
+
+  vars:
+    src_dir: "/tmp"
+    CHG_number: "CHG16May2025"
+    destination_base_dir: "/opt/refinitiv/"
+    config_subdir: "{{ destination_base_dir }}/home/tadmin/{{ CHG_number }}"
+    owner: "tadmin"
+    group: "tadmin"
+    file_mode: "0755"
+
+    rtds_env_version: "1.0.6"
+    scb_deploy_version: "2.0"
+    ads_version: "3.8.1"
+    dacs_version: "7.12.0"
+    ads_level: "L1"
+    dacs_level: "L2"
+    config_tree_version: "1.0.9"
+    download_dir: "/tmp/downloads"
+    source_base_url: "https://artifactory.global.standardchartered.com/artifactory/vendor-generic-staging-local/50730-TREP/ADO_binaries/"
+
+    files:
+      - { name: "rtds_environment_v{{ rtds_env_version }}.tar", extract: true, dest: "{{ destination_base_dir }}" }
+      - { name: "scb_rtds_deployment_scripts_v{{ scb_deploy_version }}.tar", extract: true, dest: "{{ destination_base_dir }}" }
+      - { name: "ads{{ ads_version }}.{{ ads_level }}.linux.rrg.zip", extract: false, dest: "{{ config_subdir }}" }
+      - { name: "dacs{{ dacs_version }}.{{ dacs_level }}.linux.rrg.tar.gz", extract: false, dest: "{{ config_subdir }}" }
+      - { name: "SCB_RTDS38_Config_Tree_v{{ config_tree_version }}.tar", extract: true, dest: "{{ config_subdir }}" }
+
+  tasks:
+
+    - name: Ensure download and destination directories exist
+      file:
+        path: "{{ item }}"
+        state: directory
+        mode: '0755'
+      loop:
+        - "{{ download_dir }}"
+        - "{{ destination_base_dir }}"
+        - "{{ config_subdir }}"
+
+    - name: Download deployment files from internal server
+      get_url:
+        url: "{{ source_base_url }}/{{ item.name }}"
+        dest: "{{ download_dir }}/{{ item.name }}"
+        mode: '0644'
+      loop: "{{ files }}"
+
+    - name: Extract archive
+      unarchive:
+        src: "{{ download_dir }}/{{ item.name }}"
+        dest: "{{ item.dest }}"
+        remote_src: yes
+        owner: tadmin
+        group: tadmin
+      when: item.extract
+      loop: "{{ files }}"
+
+    - name: Copy file directly (no extract)
+      copy:
+        src: "{{ download_dir }}/{{ item.name }}"
+        dest: "{{ item.dest }}/{{ item.name }}"
+        mode: '0644'
+        owner: tadmin
+        group: tadmin
+      when: not item.extract
+      loop: "{{ files }}"
+
+    - name: Find the ADS files
+      find:
+        paths: "{{ download_dir }}"
+        patterns: "ads*.linux.rrg.zip"
+      register: ads_file
+
+    - name: Set ADS version and level using filenames
+      set_fact:
+        ads_version: "{{ ads_file | regex_search('ads(\\d+\\.\\d+\\.\\d+)', '\\1') | first }}"
+        ads_level: "{{ ads_file | regex_search('ads\\d+\\.\\d+\\.\\d+\\.(L\\d+)', '\\1') | first }}"
+
+    - name: Find the DACS files
+      find:
+        paths: "{{ download_dir }}"
+        patterns: "dacs*.linux.rrg.tar.gz"
+      register: dacs_file
+
+    - name: Set DACS version and level using filenames
+      set_fact:
+        dacs_version: "{{ dacs_file | regex_search('dacs(\\d+\\.\\d+\\.\\d+)', '\\1') | first }}"
+        dacs_level: "{{ dacs_file | regex_search('dacs\\d+\\.\\d+\\.\\d+\\.(L\\d+)', '\\1') | first }}"
+
+    - name: Ensure ADS and DACS scripts are executable
+      file:
+        path: "{{ destination_base_dir }}/scb_rtds_deployment_scripts_v{{ scb_deploy_version }}/{{ item }}"
+        mode: '0755'
+      loop:
+        - ads3.X_deploy_sw.sh
+        - ads3.X_deploy_configs.sh
+        - dacs_infra_7.X_deploy_sw.sh
+        - dacs_infra_7.X_deploy_configs.sh
+      ignore_errors: yes
+
+    - name: Set ownership to tadmin to all files before script execution
+      file:
+        path: "{{ destination_base_dir }}"
+        owner: tadmin
+        group: tadmin
+        recurse: yes
+
+    - name: Run ADS software deployment script
+      shell: ./ads3.X_deploy_sw.sh -c {{ CHG_number }} -p "ads{{ ads_version }}.{{ ads_level }}.linux.rrg.zip" -v "ads{{ ads_version }}.{{ ads_level }}.linux.rrg"
+      args:
+        chdir: "{{ destination_base_dir }}/scb_rtds_deployment_scripts_v{{ scb_deploy_version }}"
+        executable: /bin/bash
+      become: true
+      become_user: tadmin
+      ignore_errors: yes
+
+    - name: Run ADS config deployment script
+      shell: ./ads3.X_deploy_configs.sh -c {{ CHG_number }} -s DEV_303a -f ads_pop.cnf -v "ads{{ ads_version }}.{{ ads_level }}.linux.rrg"
+      args:
+        chdir: "{{ destination_base_dir }}/scb_rtds_deployment_scripts_v{{ scb_deploy_version }}"
+        executable: /bin/bash
+      become: true
+      become_user: tadmin
+      ignore_errors: yes
+
+    - name: Run DACS software deployment script
+      shell: ./dacs_infra_7.X_deploy_sw.sh -c {{ CHG_number }} -p "dacs{{ dacs_version }}.{{ dacs_level }}.linux.rrg.tar.gz" -v "dacs{{ dacs_version }}.{{ dacs_level }}.linux.rrg" -i snkd
+      args:
+        chdir: "{{ destination_base_dir }}/scb_rtds_deployment_scripts_v{{ scb_deploy_version }}"
+        executable: /bin/bash
+      become: true
+      become_user: tadmin
+      ignore_errors: yes
+
+    - name: Run DACS config deployment script
+      shell: ./dacs_infra_7.X_deploy_configs.sh -c {{ CHG_number }} -s DEV_303a -v "dacs{{ dacs_version }}.{{ dacs_level }}.linux.rrg"
+      args:
+        chdir: "{{ destination_base_dir }}/scb_rtds_deployment_scripts_v{{ scb_deploy_version }}"
+        executable: /bin/bash
+      become: true
+      become_user: tadmin
+      ignore_errors: yes
+
+    - name: Set ownership to tadmin to all files at the end
+      file:
+        path: "{{ destination_base_dir }}"
+        owner: tadmin
+        group: tadmin
+        recurse: yes
+
+    - name: Copy systemd service files
+      copy:
+        src: "{{ destination_base_dir }}/etc/scripts_linux_systemctl/{{ item }}"
+        dest: "/etc/systemd/system/{{ item }}"
+        mode: '0644'
+      loop:
+        - ads.service
+        - dacs_snkd.service
+        - dacs_trans.service
+
+    - name: Reload and enable services
+      systemd:
+        name: "{{ item }}"
+        enabled: yes
+        daemon_reload: yes
+      loop:
+        - ads
+        - dacs_snkd
+        - dacs_trans
+
+    - name: Start services
+      systemd:
+        name: "{{ item }}"
+        state: started
+      loop:
+        - ads
+        - dacs_snkd
+        - dacs_trans
